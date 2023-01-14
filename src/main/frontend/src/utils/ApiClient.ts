@@ -1,0 +1,223 @@
+import jwtDecode, {JwtPayload} from "jwt-decode";
+import {store} from "../app/store";
+import {refreshUserCredentials} from "../features/auth/authSlice";
+import {warningToast} from "../features/toasts/toastsSlice";
+
+const expirationPadding = 3;
+
+function tokenIsExpired(token: string) {
+    // Token never expires
+    const exp = jwtDecode<JwtPayload>(token).exp;
+    if (exp === undefined) return false;
+
+    return exp < new Date().getTime() / 1000 + expirationPadding;
+}
+
+function postRequest(url: string, body: object, accessToken?: string) {
+    let headers = {
+        'Content-Type': 'application/json',
+        'Authorization': ''
+    };
+
+    if (accessToken !== undefined) {
+        // Check token expiration
+        if (tokenIsExpired(accessToken)) {
+            return store.dispatch(refreshUserCredentials())
+                .unwrap()
+                .then((res) => {
+                    return fetch(url, {
+                        method: 'POST',
+                        headers: {...headers, 'Authorization': `Bearer ${res.accessToken}`},
+                        body: JSON.stringify(body)
+                    });
+                })
+                .catch((err) => {
+                    store.dispatch(warningToast(`Failed to refresh credentials: ${err}`));
+                    // Return a promise that will probably fail
+                    return fetch(url)
+                })
+        }
+
+        headers['Authorization'] = `Bearer ${accessToken}`;
+    }
+    ;
+
+    return fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+    });
+}
+
+function getRequest(url: string, accessToken?: string) {
+    let headers = {
+        'Authorization': ''
+    };
+
+    if (accessToken !== undefined) {
+        // Check token expiration
+        if (tokenIsExpired(accessToken)) {
+            return store.dispatch(refreshUserCredentials())
+                .unwrap()
+                .then((res) => {
+                    return fetch(url, {headers: {...headers, 'Authorization': `Bearer ${res.accessToken}`}});
+                })
+                .catch((err) => {
+                    store.dispatch(warningToast(`Failed to refresh credentials: ${err}`));
+                    // Return a promise that will probably fail
+                    return fetch(url)
+                })
+        }
+
+        headers['Authorization'] = `Bearer ${accessToken}`;
+    }
+    ;
+
+    return fetch(url, {headers});
+}
+
+async function handleResponse<T>(resp: Response, successCallback: (resp: Response) => Promise<ApiCallStatus<T>>, payloadOnError: T): Promise<ApiCallStatus<T>> {
+    if (resp.ok) {
+        return await successCallback(resp);
+    } else {
+        const body = await resp.text();
+        try {
+            return {success: false, message: JSON.parse(body).message, payload: payloadOnError};
+        } catch (e) {
+            return {success: false, message: body, payload: payloadOnError};
+        }
+    }
+}
+
+export interface ApiCallStatus<T> {
+    success: boolean,
+    message?: string,
+    payload: T
+}
+
+export interface JwtTokenPair {
+    accessToken: string,
+    refreshToken: string
+}
+
+export interface RegistrationResult {
+    success: boolean,
+    message?: string
+}
+
+async function extractJwtTokenPairFromResponse(resp: Response): Promise<ApiCallStatus<JwtTokenPair>> {
+    return handleResponse(resp, async (r) => {
+        const body = await r.json();
+        return {success: true, payload: {accessToken: body.accessToken, refreshToken: body.refreshToken}};
+    }, {accessToken: '', refreshToken: ''});
+}
+
+
+export async function registerUser(login: string, firstName: string, lastName: string, password: string):
+    Promise<ApiCallStatus<string>> {
+    const resp = await postRequest('/api/auth/registration', {login, firstName, lastName, password});
+
+    const body = await resp.text();
+    if (!resp.ok) return {success: false, message: body, payload: ''};
+
+    return {
+        success: true,
+        payload: body
+    };
+}
+
+export async function loginUser(login: string, password: string): Promise<ApiCallStatus<JwtTokenPair>> {
+    const resp = await postRequest('/api/auth/login', {login, password});
+    return extractJwtTokenPairFromResponse(resp);
+}
+
+export async function refreshTokens(refreshToken: string): Promise<ApiCallStatus<JwtTokenPair>> {
+    const resp = await postRequest('/api/auth/refresh', {refreshToken});
+    return extractJwtTokenPairFromResponse(resp);
+}
+
+export async function getCanvasBitmap(accessToken: string): Promise<ApiCallStatus<string>> {
+    const resp = await getRequest('/api/area', accessToken);
+    const body = await resp.text();
+
+    if (!resp.ok) return {success: false, message: body, payload: ''};
+
+    return {
+        success: true,
+        payload: body
+    };
+}
+
+export interface CompoundPointRequest {
+    x: number[],
+    y: number[],
+    r: number[]
+};
+
+export interface PointAttempt {
+    id: number,
+    x: number,
+    y: number,
+    r: number,
+    timePoint: number,
+    executionTime: number,
+    success: boolean
+};
+
+export interface PagedPointsResponse {
+    content: PointAttempt[],
+    number: number,
+    totalPages: number,
+    totalElements: number
+};
+
+function transformPoint(v: any) {
+    return {
+        id: v.id,
+        x: v.x,
+        y: v.y,
+        r: v.r,
+        timePoint: v.timePoint,
+        executionTime: v.executionTime,
+        success: v.isHit
+    }
+}
+
+export async function getPoints(page: number, onlyOwned: boolean, accessToken: string): Promise<ApiCallStatus<PagedPointsResponse>> {
+    const resp = await getRequest(`/api/points?page=${page}`, accessToken);
+    return handleResponse(resp, async (r) => {
+        const pointsResp: PagedPointsResponse = await r.json();
+        console.log(pointsResp)
+        console.log(pointsResp.content)
+        const pointsTransformed = {
+            ...pointsResp,
+            content: pointsResp.content.map(transformPoint)
+        };
+        return {success: true, payload: pointsTransformed};
+    }, {content: [], number: 0, totalPages: 0, totalElements: 0});
+}
+
+export async function sendPoints(points: CompoundPointRequest, accessToken: string): Promise<ApiCallStatus<PointAttempt[]>> {
+    const resp = await postRequest('/api/points', points, accessToken);
+
+    return handleResponse(resp, async (r) => {
+        const points = await r.json();
+        const pointsTransformed: PointAttempt[] = points.map(transformPoint);
+        return {success: true, payload: pointsTransformed};
+    }, []);
+}
+
+export interface User {
+    userId: number,
+    username: string,
+    attempts: PointAttempt[]
+}
+
+export async function getUserInfo(userId: number, accessToken: string): Promise<ApiCallStatus<User>> {
+    const resp = await getRequest(`/api/auth/users/${userId}`, accessToken)
+
+    return handleResponse(resp, async (r) => {
+        const user = await r.json();
+        return {success: true, payload: user};
+    }, {userId: 0, username: 'Error', attempts: []});
+}
