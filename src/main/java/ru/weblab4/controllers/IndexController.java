@@ -5,7 +5,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 
 @Controller
 public class IndexController {
-    @RequestMapping("/{path:^(?!api)\\w*}")
+    @RequestMapping({"/", "/login"})
     public String sendStaticContent(){
         return "/index.html";
     }
