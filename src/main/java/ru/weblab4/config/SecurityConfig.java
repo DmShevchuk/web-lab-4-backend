@@ -20,7 +20,7 @@ public class SecurityConfig {
 
     private final JwtFilter jwtFilter;
 
-    private final String[] PATH_WHITELIST = new String[]{"/auth/**", "/login", "/home", "/register"};
+    private final String[] PATH_WHITELIST = new String[]{"/auth/**"};
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
